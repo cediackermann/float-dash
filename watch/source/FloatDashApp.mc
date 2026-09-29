@@ -9,14 +9,16 @@ const TICK_MS = 250;
 const REPAINT_TICKS = 4;
 
 class FloatDashApp extends Application.AppBase {
-    //! The watch app lets the rider pick the board, so it never pairs on its own.
-    var board as Board = new Board(false, null);
+    var board as Board;
 
     private var _timer as Timer.Timer = new Timer.Timer();
     private var _ticks as Number = 0;
 
     function initialize() {
         AppBase.initialize();
+        // Only after AppBase is up: the board reads settings and storage. The watch app lets the
+        // rider pick the board, so it never pairs on its own.
+        board = new Board(false, null);
     }
 
     function onStart(state as Dictionary?) as Void {
