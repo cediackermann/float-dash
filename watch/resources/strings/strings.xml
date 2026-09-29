@@ -1,0 +1,4 @@
+<strings>
+    <string id="AppName">Float Dash</string>
+    <string id="ControllerCanIdTitle">Controller CAN ID (-1 = find automatically)</string>
+</strings>

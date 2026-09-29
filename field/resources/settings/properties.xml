@@ -1,0 +1,6 @@
+<properties>
+    <!-- Empty: pair with the first device advertising the VESC Bluetooth service. -->
+    <property id="boardName" type="string"></property>
+    <!-- -1: find the controller through the connected node. -->
+    <property id="controllerCanId" type="number">-1</property>
+</properties>

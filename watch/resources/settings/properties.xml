@@ -1,0 +1,4 @@
+<properties>
+    <!-- -1: find the controller by pinging the CAN bus through the BMS. -->
+    <property id="controllerCanId" type="number">-1</property>
+</properties>

@@ -1,0 +1,5 @@
+<strings>
+    <string id="AppName">Float Dash Field</string>
+    <string id="BoardNameTitle">Board Bluetooth name (empty = first VESC found)</string>
+    <string id="ControllerCanIdTitle">Controller CAN ID (-1 = find automatically)</string>
+</strings>

@@ -1,0 +1,3 @@
+project.manifest = manifest.xml
+# Shared board code, plus the tests (`(:test)` keeps them out of release builds).
+base.sourcePath = source;../shared;../test
