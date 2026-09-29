@@ -5,6 +5,7 @@ import Toybox.System;
 import Toybox.WatchUi;
 
 const STORAGE_CONTROLLER = "controllerId";
+const STORAGE_BOARD_NAME = "boardName";
 
 //! The board as both apps see it: a Bluetooth link to one VESC node and the session that knows what
 //! to ask it. Requests are driven by the link itself — a reply or a finished write sends the next
@@ -13,14 +14,18 @@ const STORAGE_CONTROLLER = "controllerId";
 class Board {
     var session as BoardSession;
     var link as BleLink;
-    private var _autoPair as Boolean;
+    private var _autoPairAny as Boolean;
+    private var _configuredName as String?;
 
-    //! `autoPair`: connect to the first matching device without asking (a data field cannot show a
-    //! picker). `preferredName` narrows that to one device name.
-    function initialize(autoPair as Boolean, preferredName as String?) {
-        _autoPair = autoPair;
+    //! `autoPairAny`: with no name to look for, take the first VESC device found (a data field
+    //! cannot show a picker). `configuredName` is the rider's setting; otherwise the device this app
+    //! connected to last is looked for by name.
+    function initialize(autoPairAny as Boolean, configuredName as String?) {
+        _autoPairAny = autoPairAny;
+        _configuredName = (configuredName != null && !configuredName.equals("")) ? configuredName : null;
+        var preferred = _configuredName != null ? _configuredName : Storage.getValue(STORAGE_BOARD_NAME) as String?;
         session = new BoardSession(knownController());
-        link = new BleLink(self, autoPair, preferredName);
+        link = new BleLink(self, autoPairAny, preferred);
     }
 
     function start() as Void {
@@ -31,8 +36,10 @@ class Board {
         link.stop();
     }
 
-    //! Sends the session's next request if the link can take one.
+    //! Sends the session's next request if the link can take one, and gives up on a connection that
+    //! is not coming up.
     function pump() as Void {
+        link.check(System.getTimer());
         if (link.canSend()) {
             var request = session.tick(System.getTimer());
             if (request != null) {
@@ -46,9 +53,13 @@ class Board {
         if (link.state == LINK_REGISTERING) {
             return "STARTING";
         }
+        if (link.isWaiting()) {
+            // Known board not advertising: out of range, off, or held by the other Float Dash app.
+            return "WAITING FOR BOARD";
+        }
         if (link.state == LINK_SCANNING) {
             // Only the watch app can pick; a data field keeps scanning for its match.
-            return (!_autoPair && link.found.size() > 0) ? "PICK BOARD" : "SCANNING";
+            return (!_autoPairAny && link.found.size() > 0) ? "PICK BOARD" : "SCANNING";
         }
         if (link.state == LINK_CONNECTING) {
             return "CONNECTING";
@@ -65,14 +76,21 @@ class Board {
         return null;
     }
 
-    //! Switching boards: forget the pairing and where the controller was on the old one.
+    //! Switching boards: forget the device, and where the controller was on the old one.
     function forget() as Void {
         Storage.deleteValue(STORAGE_CONTROLLER);
+        Storage.deleteValue(STORAGE_BOARD_NAME);
+        link.preferredName = _configuredName;
         session = new BoardSession(configuredController());
         link.rescan();
     }
 
     function onLinkUp() as Void {
+        // Remember the device by name so the next start finds it without asking.
+        if (link.pairedName != null) {
+            Storage.setValue(STORAGE_BOARD_NAME, link.pairedName);
+            link.preferredName = link.pairedName;
+        }
         session.onConnected(System.getTimer());
         pump();
     }

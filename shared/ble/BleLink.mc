@@ -1,5 +1,6 @@
 import Toybox.BluetoothLowEnergy;
 import Toybox.Lang;
+import Toybox.System;
 import Toybox.WatchUi;
 
 //! Nordic UART Service, which VESC's Bluetooth modules expose: write requests to RX, replies arrive
@@ -17,6 +18,10 @@ enum LinkState {
     LINK_READY
 }
 
+//! A connection attempt that has not come up in this long is dropped and the scan restarts. A node
+//! busy with another app never answers, and a lost connection may be taken by the other app.
+const CONNECT_TIMEOUT_MS = 8000;
+
 //! What the link hands upwards: link up/down, write capacity freed, and complete, CRC-checked VESC
 //! payloads.
 typedef LinkListener as interface {
@@ -26,27 +31,38 @@ typedef LinkListener as interface {
     function onLinkPacket(payload as ByteArray) as Void;
 };
 
-//! Bluetooth to one VESC node over NUS (controller, Bluetooth bridge or BMS alike). Scans for the service, pairs with the chosen device (or
-//! reconnects to the one paired before), turns on TX notifications, and sends one write at a time:
-//! Connect IQ rejects a request while another is outstanding.
+//! Bluetooth to one VESC node over NUS (controller, Bluetooth bridge or BMS alike). Scans, pairs
+//! with the preferred device by name (or the one the rider picks), turns on TX notifications, and
+//! sends one write at a time: Connect IQ rejects a request while another is outstanding.
+//!
+//! A VESC node takes one connection at a time, and the watch app and the data field are separate
+//! apps. So the link holds its node only while its app runs: every start scans afresh, every stop
+//! unpairs, which ends the connection at once. A node the other app holds does not advertise; the
+//! scan keeps going and pairs as soon as it reappears.
 class BleLink extends BluetoothLowEnergy.BleDelegate {
     var state as LinkState = LINK_REGISTERING;
     //! Devices seen while scanning, for the picker. Newest name wins for a given device.
     var found as Array<BluetoothLowEnergy.ScanResult> = [] as Array<BluetoothLowEnergy.ScanResult>;
 
+    //! The device to connect to without asking. Null: the picker decides, or (with `autoPairAny`)
+    //! the first device advertising NUS.
+    var preferredName as String?;
+    //! Name of the device paired last, so the next start can find it again.
+    var pairedName as String? = null;
+
     private var _listener as LinkListener;
-    private var _autoPair as Boolean;
-    private var _preferredName as String?;
+    private var _autoPairAny as Boolean;
+    private var _connectingSinceMs as Number = 0;
     private var _device as BluetoothLowEnergy.Device? = null;
     private var _rx as BluetoothLowEnergy.Characteristic? = null;
     private var _writing as Boolean = false;
     private var _reassembler as Reassembler = new Reassembler();
 
-    function initialize(listener as LinkListener, autoPair as Boolean, preferredName as String?) {
+    function initialize(listener as LinkListener, autoPairAny as Boolean, preferred as String?) {
         BleDelegate.initialize();
         _listener = listener;
-        _autoPair = autoPair;
-        _preferredName = (preferredName != null && !preferredName.equals("")) ? preferredName : null;
+        _autoPairAny = autoPairAny;
+        preferredName = (preferred != null && !preferred.equals("")) ? preferred : null;
     }
 
     function start() as Void {
@@ -65,19 +81,35 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
         }
     }
 
+    //! Lets go of the node so the other app can have it.
     function stop() as Void {
         BluetoothLowEnergy.setScanState(BluetoothLowEnergy.SCAN_STATE_OFF);
+        forget();
     }
 
-    //! Pair with a device the rider picked. The watch keeps the pairing and reconnects on its own.
     function pair(result as BluetoothLowEnergy.ScanResult) as Void {
         BluetoothLowEnergy.setScanState(BluetoothLowEnergy.SCAN_STATE_OFF);
         forget();
+        pairedName = result.getDeviceName();
         _device = BluetoothLowEnergy.pairDevice(result);
         state = LINK_CONNECTING;
+        _connectingSinceMs = System.getTimer();
     }
 
-    //! Drop the pairing so a different board can be picked.
+    //! Gives up on a connection that is not coming up and scans again. Called periodically.
+    function check(nowMs as Number) as Void {
+        if (state == LINK_CONNECTING && nowMs - _connectingSinceMs > CONNECT_TIMEOUT_MS) {
+            rescan();
+            WatchUi.requestUpdate();
+        }
+    }
+
+    //! Scanning for a device it knows by name, which may be busy with the other app.
+    function isWaiting() as Boolean {
+        return state == LINK_SCANNING && preferredName != null;
+    }
+
+    //! Drops every pairing, which also ends the connection.
     function forget() as Void {
         var paired = BluetoothLowEnergy.getPairedDevices();
         for (var device = paired.next(); device != null; device = paired.next()) {
@@ -110,17 +142,8 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
     }
 
     function onProfileRegister(uuid as BluetoothLowEnergy.Uuid, status as BluetoothLowEnergy.Status) as Void {
-        var paired = BluetoothLowEnergy.getPairedDevices().next();
-        if (paired != null) {
-            // Paired in an earlier run: the system reconnects it, onConnectedStateChanged follows.
-            _device = paired as BluetoothLowEnergy.Device;
-            state = LINK_CONNECTING;
-            if (_device.isConnected()) {
-                onConnectedStateChanged(_device, BluetoothLowEnergy.CONNECTION_STATE_CONNECTED);
-            }
-        } else {
-            rescan();
-        }
+        // A pairing left by a run that ended without stop() is dropped too: always start from a scan.
+        rescan();
         WatchUi.requestUpdate();
     }
 
@@ -142,7 +165,7 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
             if (!known) {
                 found.add(scan);
             }
-            if (_autoPair && state == LINK_SCANNING && matchesPreferred(scan)) {
+            if (state == LINK_SCANNING && matchesPreferred(scan)) {
                 pair(scan);
                 break;
             }
@@ -150,13 +173,13 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
         WatchUi.requestUpdate();
     }
 
-    //! The named device when a name is set, otherwise any device advertising NUS.
+    //! The named device when a name is known, otherwise (if allowed) any device advertising NUS.
     private function matchesPreferred(scan as BluetoothLowEnergy.ScanResult) as Boolean {
-        if (_preferredName == null) {
-            return advertisesNus(scan);
+        if (preferredName == null) {
+            return _autoPairAny && advertisesNus(scan);
         }
         var name = scan.getDeviceName();
-        return name != null && name.equals(_preferredName);
+        return name != null && name.equals(preferredName);
     }
 
     function onConnectedStateChanged(device as BluetoothLowEnergy.Device, connectionState as BluetoothLowEnergy.ConnectionState) as Void {
@@ -164,8 +187,10 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
             return;
         }
         if (connectionState != BluetoothLowEnergy.CONNECTION_STATE_CONNECTED) {
+            // The system tries to reconnect; if that does not happen soon, check() scans again.
             var wasReady = state == LINK_READY;
             state = LINK_CONNECTING;
+            _connectingSinceMs = System.getTimer();
             _rx = null;
             _writing = false;
             if (wasReady) {

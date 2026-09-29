@@ -16,13 +16,20 @@ Bluetooth bridge and the watch with the BMS, and each has its own connection to 
   - Power: battery and motor current, temperatures
   - Ride: Refloat state, pitch, roll, footpads, trip distance
 
-  START opens the board picker; "Forget board" pairs with a different one.
+  The first time, START opens the board picker; afterwards it reconnects on its own. "Forget board"
+  in the picker switches to a different one.
 - **Float Dash Field** (data field, `field/`): speed, duty and battery inside a native Garmin
   activity. Use it with a course, so navigation stays Garmin's own: put the field in half of a
   two-field data screen next to native navigation fields. It pairs by itself with the device named
   in its settings, or the first device advertising the VESC Bluetooth service.
 
 Both read the watch's distance setting for km/h or mph.
+
+A VESC Bluetooth module takes one connection at a time, so the two apps hand the board over: each
+holds it only while it runs and lets go when it closes. Each remembers the board it used last and
+connects to it by name on start; while the other app still holds it, the screen says
+**WAITING FOR BOARD** and connects as soon as it is free. Leave the activity before opening the
+watch app on the same board.
 
 ## How it talks to the board
 
