@@ -6,6 +6,10 @@ import Toybox.WatchUi;
 
 const STORAGE_CONTROLLER = "controllerId";
 const STORAGE_BOARD_NAME = "boardName";
+//! A held remote tilt is repeated this often; Refloat drops the input after about a second.
+const TILT_REPEAT_MS = 200;
+//! Neutral is sent this many times after a tilt ends, then the stream stops.
+const TILT_NEUTRAL_REPEATS = 3;
 
 //! The board as both apps see it: a Bluetooth link to one VESC node and the session that knows what
 //! to ask it. Requests are driven by the link itself — a reply or a finished write sends the next
@@ -14,6 +18,16 @@ const STORAGE_BOARD_NAME = "boardName";
 class Board {
     var session as BoardSession;
     var link as BleLink;
+    //! Refloat [major, minor], once the controller has said.
+    var refloatVersion as [Number, Number] or Null = null;
+    //! Remote tilt input being held, 0..255 (Vesc.TILT_CENTER is none).
+    var tilt as Number = Vesc.TILT_CENTER;
+    //! Hears replies to one-off requests other than the version read (lights, config).
+    var controls as OneOffListener? = null;
+
+    private var _versionRequested as Boolean = false;
+    private var _tiltSentAtMs as Number = 0;
+    private var _neutralRepeats as Number = 0;
     private var _autoPairAny as Boolean;
     private var _configuredName as String?;
 
@@ -24,7 +38,7 @@ class Board {
         _autoPairAny = autoPairAny;
         _configuredName = (configuredName != null && !configuredName.equals("")) ? configuredName : null;
         var preferred = _configuredName != null ? _configuredName : Storage.getValue(STORAGE_BOARD_NAME) as String?;
-        session = new BoardSession(knownController());
+        session = new BoardSession(knownController(), self);
         link = new BleLink(self, autoPairAny, preferred);
     }
 
@@ -39,13 +53,58 @@ class Board {
     //! Sends the session's next request if the link can take one, and gives up on a connection that
     //! is not coming up.
     function pump() as Void {
-        link.check(System.getTimer());
-        if (link.canSend()) {
-            var request = session.tick(System.getTimer());
-            if (request != null) {
-                link.send(request);
-            }
+        var now = System.getTimer();
+        link.check(now);
+        if (!link.canSend()) {
+            return;
         }
+        // The tilt stream goes first: it has no reply and must not lapse behind telemetry.
+        if (tiltDue(now)) {
+            link.send(Vesc.remoteTilt(tilt));
+            _tiltSentAtMs = now;
+            if (tilt == Vesc.TILT_CENTER) {
+                _neutralRepeats -= 1;
+            }
+            return;
+        }
+        var request = session.tick(now);
+        if (request != null) {
+            link.send(request);
+        }
+    }
+
+    //! Holds remote tilt at `value` (0..255) until changed; Vesc.TILT_CENTER releases it. Streamed
+    //! only while connected: when the app closes or the link drops, Refloat lets go within a second.
+    function setTilt(value as Number) as Void {
+        tilt = value < 0 ? 0 : (value > 255 ? 255 : value);
+        if (tilt == Vesc.TILT_CENTER) {
+            _neutralRepeats = TILT_NEUTRAL_REPEATS;
+        }
+        _tiltSentAtMs = 0;
+        pump();
+    }
+
+    //! Refloat before 1.2 switches lights with a different command.
+    function legacyLights() as Boolean {
+        var version = refloatVersion;
+        return version != null && (version[0] < 1 || (version[0] == 1 && version[1] < 2));
+    }
+
+    function onOneOffReply(kind as OneOffKind, payload as ByteArray?) as Void {
+        if (kind == ONE_OFF_INFO) {
+            refloatVersion = payload != null ? Decoders.refloatVersion(payload) : null;
+            return;
+        }
+        if (controls != null) {
+            (controls as OneOffListener).onOneOffReply(kind, payload);
+        }
+    }
+
+    private function tiltDue(now as Number) as Boolean {
+        if (tilt == Vesc.TILT_CENTER && _neutralRepeats <= 0) {
+            return false;
+        }
+        return session.phase == PHASE_POLLING && now - _tiltSentAtMs >= TILT_REPEAT_MS;
     }
 
     //! Null while live; otherwise what the rider is waiting for, short enough for a field label.
@@ -81,7 +140,9 @@ class Board {
         Storage.deleteValue(STORAGE_CONTROLLER);
         Storage.deleteValue(STORAGE_BOARD_NAME);
         link.preferredName = _configuredName;
-        session = new BoardSession(configuredController());
+        session = new BoardSession(configuredController(), self);
+        refloatVersion = null;
+        _versionRequested = false;
         link.rescan();
     }
 
@@ -96,6 +157,10 @@ class Board {
     }
 
     function onLinkDown() as Void {
+        // Nothing to stream to; Refloat has already dropped the input by the time we reconnect.
+        tilt = Vesc.TILT_CENTER;
+        _neutralRepeats = 0;
+        _versionRequested = false;
         session.onDisconnected();
     }
 
@@ -108,6 +173,10 @@ class Board {
         session.onPacket(payload, System.getTimer());
         if (session.controllerTarget != null && session.controllerTarget != before) {
             Storage.setValue(STORAGE_CONTROLLER, session.controllerTarget);
+        }
+        if (session.phase == PHASE_POLLING && !_versionRequested) {
+            _versionRequested = true;
+            session.request(ONE_OFF_INFO, Vesc.refloatInfo());
         }
         pump();
         WatchUi.requestUpdate();

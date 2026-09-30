@@ -21,6 +21,9 @@ enum LinkState {
 //! A connection attempt that has not come up in this long is dropped and the scan restarts. A node
 //! busy with another app never answers, and a lost connection may be taken by the other app.
 const CONNECT_TIMEOUT_MS = 8000;
+//! Bytes per write: the default ATT MTU leaves 20 for the value. Longer frames (a config write) go
+//! out in pieces; the node's UART bridge joins them back into one stream.
+const WRITE_CHUNK = 20;
 
 //! What the link hands upwards: link up/down, write capacity freed, and complete, CRC-checked VESC
 //! payloads.
@@ -56,6 +59,8 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
     private var _device as BluetoothLowEnergy.Device? = null;
     private var _rx as BluetoothLowEnergy.Characteristic? = null;
     private var _writing as Boolean = false;
+    //! The rest of a frame longer than one write.
+    private var _pending as ByteArray = []b;
     private var _reassembler as Reassembler = new Reassembler();
 
     function initialize(listener as LinkListener, autoPairAny as Boolean, preferred as String?) {
@@ -135,8 +140,16 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
         if (!canSend()) {
             return;
         }
+        _pending = Vesc.frame(payload);
+        writeNextChunk();
+    }
+
+    private function writeNextChunk() as Void {
+        var size = _pending.size() < WRITE_CHUNK ? _pending.size() : WRITE_CHUNK;
+        var chunk = _pending.slice(0, size);
+        _pending = size >= _pending.size() ? []b : _pending.slice(size, null);
         _writing = true;
-        (_rx as BluetoothLowEnergy.Characteristic).requestWrite(Vesc.frame(payload), {
+        (_rx as BluetoothLowEnergy.Characteristic).requestWrite(chunk, {
             :writeType => BluetoothLowEnergy.WRITE_TYPE_WITH_RESPONSE,
         });
     }
@@ -193,6 +206,7 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
             _connectingSinceMs = System.getTimer();
             _rx = null;
             _writing = false;
+            _pending = []b;
             if (wasReady) {
                 _listener.onLinkDown();
             }
@@ -224,7 +238,12 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
     }
 
     function onCharacteristicWrite(characteristic as BluetoothLowEnergy.Characteristic, status as BluetoothLowEnergy.Status) as Void {
+        if (_pending.size() > 0 && state == LINK_READY && _rx != null) {
+            writeNextChunk();
+            return;
+        }
         _writing = false;
+        _pending = []b;
         _listener.onLinkWritable();
     }
 

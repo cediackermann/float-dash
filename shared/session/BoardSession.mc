@@ -23,8 +23,27 @@ const BMS_GIVE_UP_AFTER = 2;
 enum RequestKind {
     REQUEST_PING,
     REQUEST_REFLOAT,
-    REQUEST_BMS
+    REQUEST_BMS,
+    REQUEST_ONE_OFF
 }
+
+//! Requests sent once on demand, ahead of the next poll, always to the controller.
+enum OneOffKind {
+    ONE_OFF_INFO,
+    ONE_OFF_LIGHTS,
+    ONE_OFF_GET_CONFIG,
+    ONE_OFF_SET_CONFIG
+}
+
+//! A config write is hundreds of bytes in 20-byte Bluetooth writes, and the controller saves it to
+//! flash before it answers.
+const CONFIG_TIMEOUT_MS = 5000;
+
+//! Who hears how a one-off request ended: its reply payload, or null when it timed out or the link
+//! went down.
+typedef OneOffListener as interface {
+    function onOneOffReply(kind as OneOffKind, payload as ByteArray?) as Void;
+};
 
 //! What the watch knows about the board and how to reach it, independent of Bluetooth. The link feeds
 //! it `connected`, packets and ticks; it answers each tick with the next request to send, if any.
@@ -59,15 +78,31 @@ class BoardSession {
     private var _bmsTargets as Array<Number> = [TARGET_DIRECT] as Array<Number>;
     private var _bmsMisses as Number = 0;
 
+    private var _listener as OneOffListener?;
+    //! Queued one-offs as [kind, payload]; the first is in flight while `_awaiting` is ONE_OFF.
+    private var _oneOffs as Array<[OneOffKind, ByteArray]> = [] as Array<[OneOffKind, ByteArray]>;
+
     private var _awaiting as RequestKind? = null;
     private var _awaitingSinceMs as Number = 0;
+    private var _awaitingTimeoutMs as Number = REQUEST_TIMEOUT_MS;
     private var _requests as Number = 0;
     private var _refloatMisses as Number = 0;
 
     //! `knownController` (TARGET_DIRECT or a CAN id) skips the search: remembered from an earlier
     //! session, or set by the rider.
-    function initialize(knownController as Number?) {
+    function initialize(knownController as Number?, listener as OneOffListener?) {
         _knownController = knownController;
+        _listener = listener;
+    }
+
+    //! Queues a one-off request for the controller. It fails (null reply) when no controller is
+    //! found yet or the link drops before the reply.
+    function request(kind as OneOffKind, payload as ByteArray) as Void {
+        if (phase != PHASE_POLLING) {
+            fail(kind);
+            return;
+        }
+        _oneOffs.add([kind, payload]);
     }
 
     function onConnected(nowMs as Number) as Void {
@@ -87,6 +122,11 @@ class BoardSession {
     function onDisconnected() as Void {
         phase = PHASE_DISCONNECTED;
         _awaiting = null;
+        var pending = _oneOffs;
+        _oneOffs = [] as Array<[OneOffKind, ByteArray]>;
+        for (var i = 0; i < pending.size(); i++) {
+            fail(pending[i][0]);
+        }
     }
 
     //! The next request payload (unframed) to send now, or null to wait.
@@ -95,17 +135,37 @@ class BoardSession {
             return null;
         }
         if (_awaiting != null) {
-            if (nowMs - _awaitingSinceMs < REQUEST_TIMEOUT_MS) {
+            if (nowMs - _awaitingSinceMs < _awaitingTimeoutMs) {
                 return null;
             }
             onTimeout(_awaiting as RequestKind);
             _awaiting = null;
         }
-        return phase == PHASE_FINDING_CONTROLLER ? nextSearchRequest(nowMs) : nextPollRequest(nowMs);
+        if (phase == PHASE_FINDING_CONTROLLER) {
+            return nextSearchRequest(nowMs);
+        }
+        if (_oneOffs.size() > 0) {
+            var next = _oneOffs[0];
+            var timeout = (next[0] == ONE_OFF_GET_CONFIG || next[0] == ONE_OFF_SET_CONFIG) ? CONFIG_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+            var payload = send(REQUEST_ONE_OFF, addressed(controllerTarget as Number, next[1]), nowMs);
+            _awaitingTimeoutMs = timeout;
+            return payload;
+        }
+        return nextPollRequest(nowMs);
     }
 
     function onPacket(raw as ByteArray, nowMs as Number) as Void {
         var payload = Vesc.unwrap(raw);
+
+        if (_awaiting == REQUEST_ONE_OFF && _oneOffs.size() > 0 && answers(_oneOffs[0][0], payload)) {
+            var kind = _oneOffs[0][0];
+            _oneOffs = _oneOffs.slice(1, null);
+            _awaiting = null;
+            if (_listener != null) {
+                (_listener as OneOffListener).onOneOffReply(kind, payload);
+            }
+            return;
+        }
 
         var ids = Decoders.pingCan(payload);
         if (ids != null) {
@@ -169,7 +229,7 @@ class BoardSession {
 
     private function nextSearchRequest(nowMs as Number) as ByteArray? {
         if (_candidates.size() > 0) {
-            return send(REQUEST_REFLOAT, request(_candidates[0], Vesc.refloatAllData()), nowMs);
+            return send(REQUEST_REFLOAT, addressed(_candidates[0], Vesc.refloatAllData()), nowMs);
         }
         if (!_pingTried) {
             _pingTried = true;
@@ -177,14 +237,14 @@ class BoardSession {
         }
         // Nobody answered: start over, the board may still be booting.
         startSearch();
-        return send(REQUEST_REFLOAT, request(_candidates[0], Vesc.refloatAllData()), nowMs);
+        return send(REQUEST_REFLOAT, addressed(_candidates[0], Vesc.refloatAllData()), nowMs);
     }
 
     private function nextPollRequest(nowMs as Number) as ByteArray? {
         _requests += 1;
         if (_requests % BMS_EVERY == 0) {
             if (_bmsTargets.size() > 0) {
-                return send(REQUEST_BMS, request(_bmsTargets[0], Vesc.bmsGetValues()), nowMs);
+                return send(REQUEST_BMS, addressed(_bmsTargets[0], Vesc.bmsGetValues()), nowMs);
             }
             if (_busIds == null && !_pingTried) {
                 // The BMS did not answer through the connected node; learn the bus to try it directly.
@@ -192,10 +252,18 @@ class BoardSession {
                 return send(REQUEST_PING, Vesc.pingCan(), nowMs);
             }
         }
-        return send(REQUEST_REFLOAT, request(controllerTarget as Number, Vesc.refloatAllData()), nowMs);
+        return send(REQUEST_REFLOAT, addressed(controllerTarget as Number, Vesc.refloatAllData()), nowMs);
     }
 
     private function onTimeout(kind as RequestKind) as Void {
+        if (kind == REQUEST_ONE_OFF) {
+            if (_oneOffs.size() > 0) {
+                var failed = _oneOffs[0][0];
+                _oneOffs = _oneOffs.slice(1, null);
+                fail(failed);
+            }
+            return;
+        }
         if (kind == REQUEST_PING) {
             // This node cannot ping the bus; the connected node is the only candidate then.
             if (_busIds == null) {
@@ -263,14 +331,34 @@ class BoardSession {
         return ordered;
     }
 
-    private function request(target as Number, payload as ByteArray) as ByteArray {
+    private function addressed(target as Number, payload as ByteArray) as ByteArray {
         return target == TARGET_DIRECT ? payload : Vesc.forwardCan(target, payload);
     }
 
     private function send(kind as RequestKind, payload as ByteArray, nowMs as Number) as ByteArray {
         _awaiting = kind;
         _awaitingSinceMs = nowMs;
+        _awaitingTimeoutMs = REQUEST_TIMEOUT_MS;
         return payload;
+    }
+
+    private function answers(kind as OneOffKind, payload as ByteArray) as Boolean {
+        if (kind == ONE_OFF_INFO) {
+            return Decoders.refloatVersion(payload) != null;
+        }
+        if (kind == ONE_OFF_LIGHTS) {
+            return Decoders.lightsEcho(payload) != null;
+        }
+        if (kind == ONE_OFF_GET_CONFIG) {
+            return Decoders.configSnapshot(payload) != null;
+        }
+        return Decoders.isConfigWritten(payload);
+    }
+
+    private function fail(kind as OneOffKind) as Void {
+        if (_listener != null) {
+            (_listener as OneOffListener).onOneOffReply(kind, null);
+        }
     }
 
     //! A reply only clears the wait when it is what we asked for; a late reply to an earlier

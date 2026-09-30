@@ -148,3 +148,69 @@ function put32(bytes as ByteArray, offset as Number, value as Number) as Void {
 function assertNear(actual as Float, expected as Float) as Void {
     Test.assertMessage((actual - expected).abs() < 0.001, "expected " + expected + ", got " + actual);
 }
+
+(:test)
+function switchesOneLightOnly(logger as Logger) as Boolean {
+    Test.assert(Vesc.lights(Vesc.LIGHT_HEADLIGHTS, true, false).equals([36, 101, 20, 0, 0, 0, 2, 2]b));
+    Test.assert(Vesc.lights(Vesc.LIGHT_LEDS, false, false).equals([36, 101, 20, 0, 0, 0, 1, 0]b));
+    Test.assert(Vesc.lights(Vesc.LIGHT_LEDS, true, true).equals([36, 101, 202, 1, 1]b));
+    Test.assertEqual(Decoders.lightsEcho([36, 101, 20, 3]b) as Number, 3);
+    Test.assertEqual(Decoders.lightsEcho([36, 101, 202, 1]b) as Number, 1);
+    Test.assert(Decoders.lightsEcho([36, 101, 10, 2]b) == null);
+    return true;
+}
+
+(:test)
+function readsTheRefloatVersionFromBothInfoLayouts(logger as Logger) as Boolean {
+    var v1 = Decoders.refloatVersion([36, 101, 0, 12, 3, 0]b) as [Number, Number];
+    Test.assertEqual(v1[0], 1);
+    Test.assertEqual(v1[1], 2);
+    var info = new [3 + 25]b;
+    info[0] = 36;
+    info[1] = 101;
+    info[2] = 0;
+    info[3] = 2;
+    info[3 + 22] = 1;
+    info[3 + 23] = 3;
+    var v2 = Decoders.refloatVersion(info) as [Number, Number];
+    Test.assertEqual(v2[1], 3);
+    return true;
+}
+
+(:test)
+function writesBackExactlyTheSnapshotItRead(logger as Logger) as Boolean {
+    var snapshot = [0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3]b;
+    var reply = [Vesc.COMM_GET_CUSTOM_CONFIG, 0]b;
+    reply.addAll(snapshot);
+    Test.assert((Decoders.configSnapshot(reply) as ByteArray).equals(snapshot));
+    var write = Vesc.setConfig(snapshot);
+    Test.assert(write.slice(0, 2).equals([Vesc.COMM_SET_CUSTOM_CONFIG, 0]b));
+    Test.assert(write.slice(2, null).equals(snapshot));
+    Test.assert(Decoders.isConfigWritten([Vesc.COMM_SET_CUSTOM_CONFIG]b));
+    return true;
+}
+
+(:test)
+function longFramesRoundTripInTwentyByteChunks(logger as Logger) as Boolean {
+    var payload = new [600]b;
+    for (var i = 0; i < payload.size(); i++) {
+        payload[i] = i % 251;
+    }
+    var frame = Vesc.frame(payload);
+    Test.assertEqual(frame[0], 0x03);
+    var reassembler = new Reassembler();
+    var packets = [] as Array<ByteArray>;
+    for (var at = 0; at < frame.size(); at += 20) {
+        packets.addAll(reassembler.feed(frame.slice(at, at + 20 < frame.size() ? at + 20 : null)));
+    }
+    Test.assertEqual(packets.size(), 1);
+    Test.assert(packets[0].equals(payload));
+    return true;
+}
+
+(:test)
+function invertsRemoteTiltOnTheWire(logger as Logger) as Boolean {
+    Test.assert(Vesc.remoteTilt(Vesc.TILT_CENTER).equals([35, 0, 127]b));
+    Test.assert(Vesc.remoteTilt(255).equals([35, 0, 0]b));
+    return true;
+}

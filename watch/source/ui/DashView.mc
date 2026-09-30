@@ -85,6 +85,11 @@ class DashView extends WatchUi.View {
                 null);
         }
         drawPageDots(dc);
+        if (_board.tilt != Vesc.TILT_CENTER) {
+            var percent = tiltPercent(_board.tilt);
+            dc.setColor(Graphics.COLOR_YELLOW, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(dc.getWidth() / 2, dc.getHeight() * 4 / 100, Graphics.FONT_XTINY, "TILT " + (percent > 0 ? "+" : "") + percent + "%", Graphics.TEXT_JUSTIFY_CENTER);
+        }
     }
 
     //! Speed alone, as large as the font allows, with duty as a bar underneath.
@@ -202,17 +207,23 @@ class DashView extends WatchUi.View {
 
 class DashDelegate extends WatchUi.BehaviorDelegate {
     private var _board as Board;
+    private var _controls as BoardControls;
     private var _view as DashView;
 
-    function initialize(board as Board, view as DashView) {
+    function initialize(board as Board, controls as BoardControls, view as DashView) {
         BehaviorDelegate.initialize();
         _board = board;
+        _controls = controls;
         _view = view;
     }
 
-    //! START opens the board picker.
+    //! START: the board picker until a board is connected, then the menu (tunes, lights, tilt).
     function onSelect() as Boolean {
-        WatchUi.pushView(new BoardPicker(_board), new BoardPickerDelegate(_board), WatchUi.SLIDE_UP);
+        if (_board.link.state == LINK_SCANNING && _board.link.preferredName == null) {
+            WatchUi.pushView(new BoardPicker(_board), new BoardPickerDelegate(_board), WatchUi.SLIDE_UP);
+        } else {
+            WatchUi.pushView(new MainMenu(_controls), new MainMenuDelegate(_board, _controls), WatchUi.SLIDE_UP);
+        }
         return true;
     }
 

@@ -153,6 +153,46 @@ module Decoders {
         return sample;
     }
 
+    //! Refloat `GET_INFO`: `[major, minor]`, or null for anything else. v2 starts with its version
+    //! byte (2) and carries major/minor after flags and a 20-byte name; v1 packs major*10+minor.
+    function refloatVersion(payload as ByteArray) as [Number, Number] or Null {
+        if (!isRefloat(payload, Vesc.REFLOAT_GET_INFO) || payload.size() < 4) {
+            return null;
+        }
+        if (payload[3] == 2 && payload.size() >= 3 + 24) {
+            return [payload[3 + 22], payload[3 + 23]];
+        }
+        return [payload[3] / 10, payload[3] % 10];
+    }
+
+    //! The board's answer to a lights switch: LIGHT_* bits now on, or null for anything else.
+    function lightsEcho(payload as ByteArray) as Number? {
+        if (payload.size() < 4 ||
+                !(isRefloat(payload, Vesc.REFLOAT_LIGHTS_CONTROL) || isRefloat(payload, Vesc.REFLOAT_LIGHTS_CONTROL_LEGACY))) {
+            return null;
+        }
+        return payload[3] & (Vesc.LIGHT_LEDS | Vesc.LIGHT_HEADLIGHTS);
+    }
+
+    //! `GET_CUSTOM_CONFIG` for the Refloat index -> the snapshot (signature + config), or null.
+    function configSnapshot(payload as ByteArray) as ByteArray? {
+        if (payload.size() < 7 || payload[0] != Vesc.COMM_GET_CUSTOM_CONFIG || payload[1] != Vesc.REFLOAT_CONFIG) {
+            return null;
+        }
+        return payload.slice(2, null);
+    }
+
+    function isConfigWritten(payload as ByteArray) as Boolean {
+        return payload.size() >= 1 && payload[0] == Vesc.COMM_SET_CUSTOM_CONFIG;
+    }
+
+    function isRefloat(payload as ByteArray, command as Number) as Boolean {
+        return payload.size() >= 3 &&
+            payload[0] == Vesc.COMM_CUSTOM_APP_DATA &&
+            payload[1] == Vesc.REFLOAT_MAGIC &&
+            payload[2] == command;
+    }
+
     //! `[COMM_PING_CAN, id, id, ...]` -> the ids that answered, or null for anything else.
     function pingCan(payload as ByteArray) as Array<Number>? {
         if (payload.size() < 1 || payload[0] != Vesc.COMM_PING_CAN) {

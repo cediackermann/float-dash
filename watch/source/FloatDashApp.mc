@@ -10,6 +10,7 @@ const REPAINT_TICKS = 4;
 
 class FloatDashApp extends Application.AppBase {
     var board as Board;
+    var controls as BoardControls;
 
     private var _timer as Timer.Timer = new Timer.Timer();
     private var _ticks as Number = 0;
@@ -19,6 +20,7 @@ class FloatDashApp extends Application.AppBase {
         // Only after AppBase is up: the board reads settings and storage. The watch app lets the
         // rider pick the board, so it never pairs on its own.
         board = new Board(false, null);
+        controls = new BoardControls(board);
     }
 
     function onStart(state as Dictionary?) as Void {
@@ -33,7 +35,7 @@ class FloatDashApp extends Application.AppBase {
 
     function getInitialView() as [WatchUi.Views] or [WatchUi.Views, WatchUi.InputDelegates] {
         var view = new DashView(board);
-        return [view, new DashDelegate(board, view)];
+        return [view, new DashDelegate(board, controls, view)];
     }
 
     function onTick() as Void {

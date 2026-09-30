@@ -3,7 +3,7 @@ import Toybox.Test;
 
 (:test)
 function usesTheConnectedNodeWhenItIsTheController(logger as Logger) as Boolean {
-    var session = new BoardSession(null);
+    var session = new BoardSession(null, null);
     session.onConnected(0);
     Test.assert(sends(session.tick(0), Vesc.refloatAllData()));
     session.onPacket(allDataPayload(), 50);
@@ -15,7 +15,7 @@ function usesTheConnectedNodeWhenItIsTheController(logger as Logger) as Boolean 
 
 (:test)
 function searchesTheBusWhenTheConnectedNodeIsNotTheController(logger as Logger) as Boolean {
-    var session = new BoardSession(null);
+    var session = new BoardSession(null, null);
     session.onConnected(0);
     session.tick(0);
     // The connected node stays silent: ping the bus, then ask node 5 (silent) and node 9.
@@ -31,7 +31,7 @@ function searchesTheBusWhenTheConnectedNodeIsNotTheController(logger as Logger) 
 
 (:test)
 function ignoresRefloatDataWhileWaitingForThePing(logger as Logger) as Boolean {
-    var session = new BoardSession(null);
+    var session = new BoardSession(null, null);
     session.onConnected(0);
     session.tick(0);
     Test.assert(sends(session.tick(REQUEST_TIMEOUT_MS), Vesc.pingCan()));
@@ -43,7 +43,7 @@ function ignoresRefloatDataWhileWaitingForThePing(logger as Logger) as Boolean {
 
 (:test)
 function asksTheControllerTheBmsNamesFirst(logger as Logger) as Boolean {
-    var fresh = new BoardSession(null);
+    var fresh = new BoardSession(null, null);
     fresh.onConnected(0);
     fresh.onPacket(bmsPayload(9), 10);
     fresh.tick(0);
@@ -55,7 +55,7 @@ function asksTheControllerTheBmsNamesFirst(logger as Logger) as Boolean {
 
 (:test)
 function pollsTheBmsEveryEighthRequest(logger as Logger) as Boolean {
-    var session = new BoardSession(4);
+    var session = new BoardSession(4, null);
     session.onConnected(0);
     var bmsRequests = 0;
     for (var i = 0; i < 16; i++) {
@@ -75,7 +75,7 @@ function pollsTheBmsEveryEighthRequest(logger as Logger) as Boolean {
 
 (:test)
 function triesTheOtherBusNodesWhenTheConnectedNodeIsNoBms(logger as Logger) as Boolean {
-    var session = new BoardSession(4);
+    var session = new BoardSession(4, null);
     session.onConnected(0);
     var now = 0;
     var bmsSeen = [] as Array<ByteArray>;
@@ -100,7 +100,7 @@ function triesTheOtherBusNodesWhenTheConnectedNodeIsNoBms(logger as Logger) as B
 
 (:test)
 function waitsForTheReplyBeforeTheNextRequest(logger as Logger) as Boolean {
-    var session = new BoardSession(4);
+    var session = new BoardSession(4, null);
     session.onConnected(0);
     Test.assert(session.tick(0) != null);
     Test.assert(session.tick(100) == null);
@@ -111,7 +111,7 @@ function waitsForTheReplyBeforeTheNextRequest(logger as Logger) as Boolean {
 
 (:test)
 function searchesAgainWhenTheRememberedControllerGoesQuiet(logger as Logger) as Boolean {
-    var session = new BoardSession(4);
+    var session = new BoardSession(4, null);
     session.onConnected(0);
     session.tick(0);
     var request = null;
@@ -126,7 +126,7 @@ function searchesAgainWhenTheRememberedControllerGoesQuiet(logger as Logger) as 
 
 (:test)
 function goesStaleWithoutTelemetry(logger as Logger) as Boolean {
-    var session = new BoardSession(4);
+    var session = new BoardSession(4, null);
     session.onConnected(0);
     session.tick(0);
     session.onPacket(allDataPayload(), 100);
@@ -150,4 +150,63 @@ function bmsPayload(controllerId as Number) as ByteArray {
 //! Whether a tick produced exactly this request.
 function sends(request as ByteArray?, expected as ByteArray) as Boolean {
     return request != null && request.equals(expected);
+}
+
+//! Records one-off outcomes for the session tests.
+class OneOffRecorder {
+    var replies as Array<[OneOffKind, ByteArray?]> = [] as Array<[OneOffKind, ByteArray?]>;
+
+    function initialize() {
+    }
+
+    function onOneOffReply(kind as OneOffKind, payload as ByteArray?) as Void {
+        replies.add([kind, payload]);
+    }
+}
+
+(:test)
+function sendsAOneOffToTheControllerBeforeTheNextPoll(logger as Logger) as Boolean {
+    var recorder = new OneOffRecorder();
+    var session = new BoardSession(4, recorder);
+    session.onConnected(0);
+    session.request(ONE_OFF_LIGHTS, Vesc.lights(Vesc.LIGHT_LEDS, true, false));
+    Test.assert(sends(session.tick(0), Vesc.forwardCan(4, Vesc.lights(Vesc.LIGHT_LEDS, true, false))));
+    session.onPacket([36, 101, 20, 1]b, 50);
+    Test.assertEqual(recorder.replies.size(), 1);
+    Test.assertEqual(recorder.replies[0][0], ONE_OFF_LIGHTS);
+    Test.assert(sends(session.tick(100), Vesc.forwardCan(4, Vesc.refloatAllData())));
+    return true;
+}
+
+(:test)
+function givesAConfigWriteTimeToLand(logger as Logger) as Boolean {
+    var recorder = new OneOffRecorder();
+    var session = new BoardSession(TARGET_DIRECT, recorder);
+    session.onConnected(0);
+    session.request(ONE_OFF_SET_CONFIG, Vesc.setConfig([1, 2, 3, 4, 5]b));
+    session.tick(0);
+    Test.assert(session.tick(REQUEST_TIMEOUT_MS + 1) == null);
+    Test.assertEqual(recorder.replies.size(), 0);
+    session.tick(CONFIG_TIMEOUT_MS);
+    Test.assertEqual(recorder.replies.size(), 1);
+    Test.assert(recorder.replies[0][1] == null);
+    return true;
+}
+
+(:test)
+function failsOneOffsWhenTheLinkDrops(logger as Logger) as Boolean {
+    var recorder = new OneOffRecorder();
+    var session = new BoardSession(4, recorder);
+    session.onConnected(0);
+    session.request(ONE_OFF_GET_CONFIG, Vesc.getConfig());
+    session.request(ONE_OFF_INFO, Vesc.refloatInfo());
+    session.tick(0);
+    session.onDisconnected();
+    Test.assertEqual(recorder.replies.size(), 2);
+    // And nothing is accepted before a controller is known.
+    var searching = new BoardSession(null, recorder);
+    searching.onConnected(0);
+    searching.request(ONE_OFF_INFO, Vesc.refloatInfo());
+    Test.assertEqual(recorder.replies.size(), 3);
+    return true;
 }

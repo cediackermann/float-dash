@@ -6,11 +6,24 @@ module Vesc {
     const COMM_FW_VERSION = 0;
     const COMM_FORWARD_CAN = 34;
     const COMM_CUSTOM_APP_DATA = 36;
+    const COMM_SET_CHUCK_DATA = 35;
     const COMM_PING_CAN = 62;
+    const COMM_GET_CUSTOM_CONFIG = 93;
+    const COMM_SET_CUSTOM_CONFIG = 95;
     const COMM_BMS_GET_VALUES = 96;
 
+    //! Custom config index of the Refloat package.
+    const REFLOAT_CONFIG = 0;
     const REFLOAT_MAGIC = 101;
+    const REFLOAT_GET_INFO = 0;
     const REFLOAT_GET_ALLDATA = 10;
+    //! Lights switch from Refloat 1.2 (uint32 mask); 1.0-1.1 used 202 with a one-byte mask.
+    const REFLOAT_LIGHTS_CONTROL = 20;
+    const REFLOAT_LIGHTS_CONTROL_LEGACY = 202;
+    const LIGHT_LEDS = 0x1;
+    const LIGHT_HEADLIGHTS = 0x2;
+    //! Remote tilt neutral on the 0..255 input scale.
+    const TILT_CENTER = 128;
     //! Mode 2 adds odometer and temperatures to the realtime fields.
     const REFLOAT_ALLDATA_MODE = 2;
     const REFLOAT_FAULT_MODE = 69;
@@ -31,11 +44,12 @@ module Vesc {
         return crc;
     }
 
-    //! Wraps a payload in a short VESC frame: `[0x02][len][payload][crc hi][crc lo][0x03]`.
-    //! Every request this app sends is well under 256 bytes.
+    //! Wraps a payload in a VESC frame: `[0x02][len]` up to 255 bytes, `[0x03][len hi][len lo]` above
+    //! (a config write), then `[payload][crc hi][crc lo][0x03]`.
     function frame(payload as ByteArray) as ByteArray {
-        var crc = crc16(payload, 0, payload.size());
-        var out = [0x02, payload.size()]b;
+        var size = payload.size();
+        var crc = crc16(payload, 0, size);
+        var out = size <= 255 ? [0x02, size]b : [0x03, (size >> 8) & 0xFF, size & 0xFF]b;
         out.addAll(payload);
         out.addAll([(crc >> 8) & 0xFF, crc & 0xFF, 0x03]b);
         return out;
@@ -58,6 +72,39 @@ module Vesc {
 
     function bmsGetValues() as ByteArray {
         return [COMM_BMS_GET_VALUES]b;
+    }
+
+    //! INFO v2 carries major, minor and patch; older packages answer in the v1 layout anyway.
+    function refloatInfo() as ByteArray {
+        return [COMM_CUSTOM_APP_DATA, REFLOAT_MAGIC, REFLOAT_GET_INFO, 2]b;
+    }
+
+    function getConfig() as ByteArray {
+        return [COMM_GET_CUSTOM_CONFIG, REFLOAT_CONFIG]b;
+    }
+
+    //! `snapshot` is what `getConfig` returned after the command and index: the package signature
+    //! (uint32) followed by the encoded config.
+    function setConfig(snapshot as ByteArray) as ByteArray {
+        var out = [COMM_SET_CUSTOM_CONFIG, REFLOAT_CONFIG]b;
+        out.addAll(snapshot);
+        return out;
+    }
+
+    //! Switches one light (`LIGHT_LEDS` or `LIGHT_HEADLIGHTS`). The mask names only that switch, so
+    //! the other keeps whatever state it has. `legacy`: Refloat older than 1.2.
+    function lights(light as Number, on as Boolean, legacy as Boolean) as ByteArray {
+        var value = on ? light : 0;
+        return legacy
+            ? [COMM_CUSTOM_APP_DATA, REFLOAT_MAGIC, REFLOAT_LIGHTS_CONTROL_LEGACY, light, value]b
+            : [COMM_CUSTOM_APP_DATA, REFLOAT_MAGIC, REFLOAT_LIGHTS_CONTROL, 0, 0, 0, light, value]b;
+    }
+
+    //! Remote tilt input, sent as Nunchuk data that Refloat reads as its UART remote (when the tune
+    //! has `inputtilt_remote_type` = UART). `value` 0..255, 128 neutral; the wire Y axis is inverted.
+    //! Refloat drops the input after about a second without a repeat. No reply.
+    function remoteTilt(value as Number) as ByteArray {
+        return [COMM_SET_CHUCK_DATA, 0, 255 - value]b;
     }
 
     //! A forwarded reply usually arrives with the forward prefix already stripped. Some bridges keep
