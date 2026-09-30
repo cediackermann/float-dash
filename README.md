@@ -18,8 +18,7 @@ Bluetooth bridge and the watch with the BMS, and each has its own connection to 
 
   The first time, START opens the board picker; afterwards it reconnects on its own and START opens
   the menu:
-  - **Tunes**: four named slots. *Save* stores the board's Refloat config; *Apply* writes a stored
-    one back after a confirmation. See below.
+  - **Tunes**: four named slots to pull the board's tune into and apply again. See below.
   - **Lights** and **Headlight** switches. Refloat 1.2+ keeps these as a runtime override until the
     board powers off; older Refloat writes them to the config.
   - **Remote tilt**: UP and DOWN change the held input in ~10 % steps, START returns it to 0. The
@@ -41,20 +40,27 @@ watch app on the same board.
 
 ## Tunes
 
-A stored tune is a snapshot of the board's whole Refloat config, written back byte for byte. That
-means it can only return the board to a state it has been in — but also that it restores the
-snapshot's light and battery settings along with the ride feel. (Editing single tune fields would
-need the config schema, which the board only sends compressed; a watch cannot unpack it.)
+A tune is how the board rides: Refloat's **Tune**, **Tune Modifiers** and **ATR** settings (PID,
+balance filter, brake scaling, boosters, nose angling, torque/turn/brake tilt, ATR). Lights,
+battery, faults, startup, remote and hardware settings are never touched.
 
-Applying refuses when:
-- the board is engaged, rolling or a footpad is pressed (checked before reading and again before
-  writing),
-- the snapshot's config signature differs from the board's — i.e. it was saved on another Refloat
-  version,
-- there is no live data.
+- *Pull board tune* (an empty slot, or *Update from board*) reads the board's config and keeps the
+  tune fields.
+- *Apply* reads the board's config again, replaces only the tune fields, writes it and reads it
+  back to confirm. The list marks the slot that is on the board.
+- Applying only happens while the board **stands still with nobody on it**: not engaged, no
+  footpad pressed, not rolling — checked before reading and again right before writing.
+- A tune only goes back onto the same Refloat config layout it was pulled from; on another Refloat
+  version it is refused rather than written into the wrong fields.
 
-Every write is read back and compared. Other apps connected to the same board (e.g. Vescape on the
-phone) still hold the config they read before, so let them re-read it after applying a tune.
+The watch cannot read the config schema from the board (it arrives compressed), so the positions of
+the tune fields come from `watch/source/tune/TuneLayouts.mc`, generated from `settings.xml` of every
+Refloat release by `tools/gen_tune_layouts.py`. It covers Refloat 1.0.0 to 1.3.0; for a newer
+release, rerun the script. The layout is chosen by the config's signature, computed the way VESC
+Tool computes it, and its length is checked before anything is written.
+
+Other apps connected to the same board (e.g. Vescape on the phone) still hold the config they read
+before, so let them re-read it after applying a tune.
 
 ## How it talks to the board
 

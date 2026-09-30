@@ -4,24 +4,29 @@ import Toybox.System;
 import Toybox.WatchUi;
 
 const TUNE_SLOTS = 4;
-const STORAGE_TUNES = "tunes";
+//! Key changed from the whole-config snapshots of the first version, which are not tunes.
+const STORAGE_TUNES = "tunesV2";
 
-//! A saved tune: the board's whole Refloat config (package signature + encoded config), as read.
+//! A saved tune: the bytes of the tune fields (see TuneCodec) and the config signature they were
+//! read under. A tune only goes back onto a board with the same signature: another layout means
+//! another Refloat version, where the same bytes would land on other fields.
 class Tune {
     var name as String;
-    var snapshot as ByteArray;
-    //! "1.2" style, for the list; compatibility itself is decided by the snapshot's signature.
+    var signature as Number;
+    var bytes as ByteArray;
     var version as String;
 
-    function initialize(name as String, snapshot as ByteArray, version as String) {
+    function initialize(name as String, signature as Number, bytes as ByteArray, version as String) {
         self.name = name;
-        self.snapshot = snapshot;
+        self.signature = signature;
+        self.bytes = bytes;
         self.version = version;
     }
 }
 
 enum TuneStep {
     STEP_IDLE,
+    STEP_REFRESH_READ,
     STEP_SAVE_READ,
     STEP_APPLY_READ,
     STEP_APPLY_WRITE,
@@ -31,23 +36,25 @@ enum TuneStep {
 //! What the rider can change on the board from the watch app: the two light switches and up to four
 //! stored tunes.
 //!
-//! A tune is a snapshot of the whole Refloat config. Changing single tune fields would need the
-//! config schema, which the board only hands out compressed and a watch cannot unpack; a snapshot is
-//! written back byte for byte, so it can only ever put the board in a state it has been in. It also
-//! restores everything else in the Refloat config as it was (lights, battery settings), which is
-//! why applying one says so. Guards: never while the board is engaged or rolling, never across a
-//! different config signature (another Refloat version), and every write is read back.
+//! A tune is how the board rides — Refloat's Tune, Tune Modifiers and ATR fields — and nothing else.
+//! Saving reads the board's config and keeps those fields. Applying reads the board's config again,
+//! replaces only those fields, writes it and reads it back: lights, battery, faults and remote stay
+//! as they are on the board. Applying only happens while the board stands still: not engaged, feet
+//! off, not rolling — checked before the read and again right before the write.
 class BoardControls {
     //! LIGHT_* bits the board last reported on, or null before it has said.
     var lights as Number? = null;
     //! What the last tune action is doing or how it ended, for the status screen.
     var tuneStatus as String? = null;
+    //! Tune fields on the board as last read, with their signature, for "on board" in the list.
+    var boardTune as Tune? = null;
 
     private var _board as Board;
     private var _tunes as Array<Tune?>;
     private var _step as TuneStep = STEP_IDLE;
     private var _slot as Number = 0;
     private var _pendingName as String = "";
+    private var _written as ByteArray? = null;
 
     function initialize(board as Board) {
         _board = board;
@@ -59,8 +66,16 @@ class BoardControls {
         return _tunes[slot];
     }
 
+    //! Whether a slot holds exactly what the board rides with now (as last read).
+    function isOnBoard(slot as Number) as Boolean {
+        var stored = _tunes[slot];
+        var current = boardTune;
+        return stored != null && current != null &&
+            stored.signature == current.signature && stored.bytes.equals(current.bytes);
+    }
+
     function isBusy() as Boolean {
-        return _step != STEP_IDLE;
+        return _step != STEP_IDLE && _step != STEP_REFRESH_READ;
     }
 
     function setLight(light as Number, on as Boolean) as Void {
@@ -68,9 +83,17 @@ class BoardControls {
         _board.pump();
     }
 
-    //! Reads the board's current config into `slot` under `name`.
+    //! Reads the board's tune quietly, so the list can show which slot is on the board.
+    function refreshBoardTune() as Void {
+        if (_step == STEP_IDLE && _board.session.phase == PHASE_POLLING) {
+            _step = STEP_REFRESH_READ;
+            requestConfig();
+        }
+    }
+
+    //! Pulls the board's current tune into `slot` under `name`.
     function saveTune(slot as Number, name as String) as Void {
-        if (!start("Reading board config…")) {
+        if (!start("Reading the board's tune…")) {
             return;
         }
         _slot = slot;
@@ -79,10 +102,8 @@ class BoardControls {
         requestConfig();
     }
 
-    //! Reads the board's config first, then writes the stored one if it is safe and different.
     function applyTune(slot as Number) as Void {
-        var stored = _tunes[slot];
-        if (stored == null || !start("Checking board…")) {
+        if (_tunes[slot] == null || !start("Checking the board…")) {
             return;
         }
         var refusal = unsafeToWrite();
@@ -121,9 +142,9 @@ class BoardControls {
         }
         if (payload == null) {
             var mayHaveWritten = _step == STEP_APPLY_WRITE || _step == STEP_APPLY_VERIFY;
-            finish(mayHaveWritten
+            finish(_step == STEP_REFRESH_READ ? null : (mayHaveWritten
                 ? "No answer while writing. Check the board's tune in VESC Tool before riding."
-                : "No answer from the board. Nothing was changed.");
+                : "No answer from the board. Nothing was changed."));
             return;
         }
         if (kind == ONE_OFF_GET_CONFIG) {
@@ -136,26 +157,47 @@ class BoardControls {
         WatchUi.requestUpdate();
     }
 
-    private function onConfig(current as ByteArray) as Void {
+    private function onConfig(snapshot as ByteArray) as Void {
+        var layout = TuneCodec.layoutOf(snapshot);
+        if (layout == null) {
+            // Unknown Refloat layout: no field is touched without knowing where it is.
+            boardTune = null;
+            finish(_step == STEP_REFRESH_READ ? null
+                : "This Refloat version is not supported for tunes yet. Nothing was changed.");
+            return;
+        }
+        var ranges = layout[1];
+        var signature = TuneCodec.signature(snapshot);
+        var onBoard = new Tune("", signature, TuneCodec.extract(snapshot, ranges), versionText());
+        boardTune = onBoard;
+
+        if (_step == STEP_REFRESH_READ) {
+            finish(null);
+            return;
+        }
         if (_step == STEP_SAVE_READ) {
-            _tunes[_slot] = new Tune(_pendingName, current, versionText());
+            _tunes[_slot] = new Tune(_pendingName, signature, onBoard.bytes, versionText());
             storeTunes();
             finish("Saved \"" + _pendingName + "\".");
             return;
         }
         var stored = _tunes[_slot] as Tune;
         if (_step == STEP_APPLY_VERIFY) {
-            finish(current.equals(stored.snapshot)
+            finish(snapshot.equals(_written)
                 ? "Applied \"" + stored.name + "\"."
-                : "The board did not keep \"" + stored.name + "\". Its config is unchanged or partly changed; check it in VESC Tool.");
+                : "The board did not keep \"" + stored.name + "\". Check its tune in VESC Tool before riding.");
             return;
         }
-        // STEP_APPLY_READ: the signature is the config layout; another one means another Refloat.
-        if (!current.slice(0, 4).equals(stored.snapshot.slice(0, 4))) {
-            finish("\"" + stored.name + "\" was saved on a different Refloat version (" + stored.version + "). Not applied.");
+        // STEP_APPLY_READ
+        if (signature != stored.signature) {
+            finish("\"" + stored.name + "\" was saved on Refloat " + stored.version + ", the board runs another version. Not applied.");
             return;
         }
-        if (current.equals(stored.snapshot)) {
+        if (stored.bytes.size() != TuneCodec.tuneLength(ranges)) {
+            finish("\"" + stored.name + "\" does not fit this board's layout. Not applied.");
+            return;
+        }
+        if (onBoard.bytes.equals(stored.bytes)) {
             finish("\"" + stored.name + "\" is already on the board.");
             return;
         }
@@ -165,26 +207,29 @@ class BoardControls {
             finish(refusal);
             return;
         }
+        var patched = TuneCodec.patch(snapshot, ranges, stored.bytes);
+        _written = patched;
         tuneStatus = "Writing \"" + stored.name + "\"…";
         _step = STEP_APPLY_WRITE;
-        _board.session.request(ONE_OFF_SET_CONFIG, Vesc.setConfig(stored.snapshot));
+        _board.session.request(ONE_OFF_SET_CONFIG, Vesc.setConfig(patched));
         _board.pump();
     }
 
-    //! A reason not to write the config now, or null when it is safe.
+    //! A reason not to write now, or null while the board stands still: live data, not engaged, no
+    //! footpad pressed, not rolling.
     private function unsafeToWrite() as String? {
         var sample = _board.session.refloat;
         if (sample == null || _board.session.isStale(System.getTimer())) {
             return "No live data from the board. Not applied.";
         }
         if (sample.isEngaged() || sample.footpads() != 0 || sample.speed.abs() > 1.0) {
-            return "Step off and stop the board first. Not applied.";
+            return "The board must stand still with nobody on it. Not applied.";
         }
         return null;
     }
 
     private function start(status as String) as Boolean {
-        if (_step != STEP_IDLE) {
+        if (isBusy()) {
             return false;
         }
         if (_board.session.phase != PHASE_POLLING) {
@@ -200,8 +245,11 @@ class BoardControls {
         _board.pump();
     }
 
-    private function finish(status as String) as Void {
-        tuneStatus = status;
+    //! `status` null keeps the last message (a quiet refresh has nothing to report).
+    private function finish(status as String?) as Void {
+        if (status != null) {
+            tuneStatus = status;
+        }
         _step = STEP_IDLE;
         WatchUi.requestUpdate();
     }
@@ -212,13 +260,15 @@ class BoardControls {
     }
 
     private function loadTunes() as Array<Tune?> {
+        // The first version kept whole-config snapshots under "tunes"; never write those back.
+        Storage.deleteValue("tunes");
         var tunes = new [TUNE_SLOTS] as Array<Tune?>;
         var stored = Storage.getValue(STORAGE_TUNES) as Array<Array?>?;
         if (stored != null) {
             for (var i = 0; i < TUNE_SLOTS && i < stored.size(); i++) {
                 var entry = stored[i];
-                if (entry != null && entry.size() == 3) {
-                    tunes[i] = new Tune(entry[0] as String, entry[1] as ByteArray, entry[2] as String);
+                if (entry != null && entry.size() == 4) {
+                    tunes[i] = new Tune(entry[0] as String, entry[1] as Number, entry[2] as ByteArray, entry[3] as String);
                 }
             }
         }
@@ -229,7 +279,7 @@ class BoardControls {
         var stored = [] as Array<Storage.ValueType>;
         for (var i = 0; i < TUNE_SLOTS; i++) {
             var tune = _tunes[i];
-            stored.add(tune == null ? null : [tune.name, tune.snapshot, tune.version] as Array<Storage.ValueType>);
+            stored.add(tune == null ? null : [tune.name, tune.signature, tune.bytes, tune.version] as Array<Storage.ValueType>);
         }
         Storage.setValue(STORAGE_TUNES, stored);
     }

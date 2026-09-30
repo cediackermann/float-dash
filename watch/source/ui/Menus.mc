@@ -7,7 +7,7 @@ import Toybox.WatchUi;
 class MainMenu extends WatchUi.Menu2 {
     function initialize(controls as BoardControls) {
         Menu2.initialize({ :title => "Float Dash" });
-        addItem(new WatchUi.MenuItem("Tunes", "Save and apply", :tunes, {}));
+        addItem(new WatchUi.MenuItem("Tunes", "Pull and apply", :tunes, {}));
         var lights = controls.lights;
         addItem(new WatchUi.ToggleMenuItem("Lights", lights == null ? "State unknown" : null, :leds,
             lights != null && (lights & Vesc.LIGHT_LEDS) != 0, {}));
@@ -56,9 +56,16 @@ class TunesMenu extends WatchUi.Menu2 {
         refresh();
     }
 
+    //! Also reads the board's tune, so the slot it matches shows as on board once the reply is in.
     function onShow() as Void {
+        _controls.refreshBoardTune();
         refresh();
         Menu2.onShow();
+    }
+
+    function onUpdate(dc as Graphics.Dc) as Void {
+        refresh();
+        Menu2.onUpdate(dc);
     }
 
     private function refresh() as Void {
@@ -66,7 +73,8 @@ class TunesMenu extends WatchUi.Menu2 {
             var item = getItem(slot) as WatchUi.MenuItem;
             var tune = _controls.tune(slot);
             item.setLabel(tune == null ? "Empty " + (slot + 1) : tune.name);
-            item.setSubLabel(tune == null ? "Save board tune here" : "Refloat " + tune.version);
+            item.setSubLabel(tune == null ? "Pull board tune here"
+                : (_controls.isOnBoard(slot) ? "On board" : "Refloat " + tune.version));
         }
     }
 }
@@ -93,8 +101,8 @@ class TunesMenuDelegate extends WatchUi.Menu2InputDelegate {
 class TuneActionsMenu extends WatchUi.Menu2 {
     function initialize(tune as Tune) {
         Menu2.initialize({ :title => tune.name });
-        addItem(new WatchUi.MenuItem("Apply", "Board stopped, feet off", :apply, {}));
-        addItem(new WatchUi.MenuItem("Replace", "With the board's tune now", :replace, {}));
+        addItem(new WatchUi.MenuItem("Apply", "Board standing, nobody on", :apply, {}));
+        addItem(new WatchUi.MenuItem("Update from board", "Pull the board's tune", :replace, {}));
         addItem(new WatchUi.MenuItem("Rename", null, :rename, {}));
         addItem(new WatchUi.MenuItem("Delete", null, :delete, {}));
     }
@@ -115,7 +123,7 @@ class TuneActionsDelegate extends WatchUi.Menu2InputDelegate {
         var tune = _controls.tune(_slot) as Tune;
         if (id == :apply) {
             WatchUi.pushView(
-                new WatchUi.Confirmation("Apply " + tune.name + "? Replaces the whole Refloat config, lights and battery settings too."),
+                new WatchUi.Confirmation("Apply " + tune.name + "? Changes how the board rides."),
                 new TuneConfirmDelegate(_controls, _slot),
                 WatchUi.SLIDE_IMMEDIATE);
         } else if (id == :replace) {
