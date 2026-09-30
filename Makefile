@@ -8,7 +8,7 @@ DEVELOPER_KEY ?= $(HOME)/.garmin/developer_key.der
 MONKEYC = "$(CONNECTIQ_SDK)/bin/monkeyc" -d $(DEVICE) -y "$(DEVELOPER_KEY)" -w -l 3
 MONKEYDO = "$(CONNECTIQ_SDK)/bin/monkeydo"
 
-.PHONY: build watch field test clean
+.PHONY: build watch field test sim-watch sim-field clean
 
 build: watch field
 	@echo "Sideload: copy build/float-dash.prg and build/float-dash-field.prg to GARMIN/APPS on the watch."
@@ -26,6 +26,13 @@ test:
 	@mkdir -p build
 	$(MONKEYC) -f watch/monkey.jungle --unit-test -o build/float-dash-test.prg
 	$(MONKEYDO) build/float-dash-test.prg $(DEVICE) -t
+
+# Run in the Connect IQ simulator (start it first from the SDK's bin/ConnectIQ.app).
+sim-watch: watch
+	$(MONKEYDO) build/float-dash.prg $(DEVICE)
+
+sim-field: field
+	$(MONKEYDO) build/float-dash-field.prg $(DEVICE)
 
 clean:
 	rm -rf build
