@@ -2,7 +2,6 @@ import Toybox.Application.Properties;
 import Toybox.Application.Storage;
 import Toybox.Lang;
 import Toybox.System;
-import Toybox.WatchUi;
 
 const STORAGE_CONTROLLER = "controllerId";
 const STORAGE_BOARD_NAME = "boardName";
@@ -24,6 +23,8 @@ class Board {
     var tilt as Number = Vesc.TILT_CENTER;
     //! Hears replies to one-off requests other than the version read (lights, config).
     var controls as OneOffListener? = null;
+    //! New telemetry since the screen was last drawn; the app repaints on its own schedule.
+    var changed as Boolean = false;
 
     private var _versionRequested as Boolean = false;
     private var _tiltSentAtMs as Number = 0;
@@ -48,6 +49,13 @@ class Board {
 
     function stop() as Void {
         link.stop();
+    }
+
+    //! Starts searching again if the link gave up; otherwise does nothing.
+    function wake() as Void {
+        if (link.state == LINK_IDLE) {
+            link.searchAgain();
+        }
     }
 
     //! Sends the session's next request if the link can take one, and gives up on a connection that
@@ -112,6 +120,10 @@ class Board {
         if (link.state == LINK_REGISTERING) {
             return "STARTING";
         }
+        if (link.state == LINK_IDLE) {
+            // The watch app searches again on START; a data field when the activity starts or resumes.
+            return _autoPairAny ? "NO BOARD" : "START: SEARCH";
+        }
         if (link.isWaiting()) {
             // Known board not advertising: out of range, off, or held by the other Float Dash app.
             return "WAITING FOR BOARD";
@@ -143,7 +155,7 @@ class Board {
         session = new BoardSession(configuredController(), self);
         refloatVersion = null;
         _versionRequested = false;
-        link.rescan();
+        link.searchAgain();
     }
 
     function onLinkUp() as Void {
@@ -178,8 +190,8 @@ class Board {
             _versionRequested = true;
             session.request(ONE_OFF_INFO, Vesc.refloatInfo());
         }
+        changed = true;
         pump();
-        WatchUi.requestUpdate();
     }
 
     //! The rider's CAN id setting wins; otherwise where the controller was found on an earlier run

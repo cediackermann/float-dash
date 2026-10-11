@@ -13,8 +13,15 @@ const TARGET_DIRECT = -1;
 const REQUEST_TIMEOUT_MS = 1000;
 //! Telemetry older than this is shown as stale.
 const STALE_AFTER_MS = 2000;
-//! One BMS request per this many requests: cells change slowly and the reply is large.
-const BMS_EVERY = 8;
+//! Telemetry polls at most this often while someone rides (engaged, on the pads or rolling). Under
+//! the watch app's 250 ms tick, so timer jitter never skips a tick: four polls a second.
+const POLL_RIDING_MS = 200;
+//! And this often while the board stands still. Under a second, so a data field, which can only
+//! poll from its once-a-second compute, does not skip every other second.
+const POLL_STILL_MS = 900;
+//! The BMS is read this often (first right after the first telemetry): cells and charge change
+//! slowly and the reply is large.
+const BMS_INTERVAL_MS = 5000;
 //! Unanswered Refloat requests in a row after which the controller is searched for again.
 const REDISCOVER_AFTER_TIMEOUTS = 5;
 //! Unanswered BMS requests in a row after which the next BMS candidate is tried.
@@ -85,7 +92,9 @@ class BoardSession {
     private var _awaiting as RequestKind? = null;
     private var _awaitingSinceMs as Number = 0;
     private var _awaitingTimeoutMs as Number = REQUEST_TIMEOUT_MS;
-    private var _requests as Number = 0;
+    //! When the last poll went out, or null for none since connecting.
+    private var _polledAtMs as Number? = null;
+    private var _bmsDueAtMs as Number = 0;
     private var _refloatMisses as Number = 0;
 
     //! `knownController` (TARGET_DIRECT or a CAN id) skips the search: remembered from an earlier
@@ -107,7 +116,8 @@ class BoardSession {
 
     function onConnected(nowMs as Number) as Void {
         _awaiting = null;
-        _requests = 0;
+        _polledAtMs = null;
+        _bmsDueAtMs = nowMs;
         _refloatMisses = 0;
         _bmsMisses = 0;
         _bmsTargets = [TARGET_DIRECT] as Array<Number>;
@@ -240,9 +250,16 @@ class BoardSession {
         return send(REQUEST_REFLOAT, addressed(_candidates[0], Vesc.refloatAllData()), nowMs);
     }
 
+    //! The radio is the battery's biggest cost: polls are spaced out, faster only while riding.
     private function nextPollRequest(nowMs as Number) as ByteArray? {
-        _requests += 1;
-        if (_requests % BMS_EVERY == 0) {
+        var sample = refloat;
+        var interval = (sample == null || sample.isStill()) ? POLL_STILL_MS : POLL_RIDING_MS;
+        if (_polledAtMs != null && nowMs - (_polledAtMs as Number) < interval) {
+            return null;
+        }
+        _polledAtMs = nowMs;
+        if (_refloatAtMs != null && nowMs >= _bmsDueAtMs) {
+            _bmsDueAtMs = nowMs + BMS_INTERVAL_MS;
             if (_bmsTargets.size() > 0) {
                 return send(REQUEST_BMS, addressed(_bmsTargets[0], Vesc.bmsGetValues()), nowMs);
             }

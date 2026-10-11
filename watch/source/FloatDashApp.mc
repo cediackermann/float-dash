@@ -3,9 +3,10 @@ import Toybox.Lang;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
-//! Backstop for request timeouts and repaints; replies drive the request rate themselves.
+//! Sends polls when due (see BoardSession), times out requests, and repaints: at most this often,
+//! when new telemetry came in.
 const TICK_MS = 250;
-//! Repaint at least this often so a board that went quiet turns stale on screen.
+//! Repaint at least this often anyway, so a board that went quiet turns stale on screen.
 const REPAINT_TICKS = 4;
 
 class FloatDashApp extends Application.AppBase {
@@ -41,7 +42,8 @@ class FloatDashApp extends Application.AppBase {
     function onTick() as Void {
         board.pump();
         _ticks += 1;
-        if (_ticks % REPAINT_TICKS == 0) {
+        if (board.changed || _ticks % REPAINT_TICKS == 0) {
+            board.changed = false;
             WatchUi.requestUpdate();
         }
     }

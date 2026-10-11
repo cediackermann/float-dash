@@ -54,22 +54,59 @@ function asksTheControllerTheBmsNamesFirst(logger as Logger) as Boolean {
 }
 
 (:test)
-function pollsTheBmsEveryEighthRequest(logger as Logger) as Boolean {
+function readsTheBmsAfterTheFirstTelemetryThenEveryFewSeconds(logger as Logger) as Boolean {
     var session = new BoardSession(4, null);
     session.onConnected(0);
-    var bmsRequests = 0;
-    for (var i = 0; i < 16; i++) {
-        var request = session.tick(i * 100) as ByteArray;
+    var bmsAt = [] as Array<Number>;
+    for (var now = 0; now <= 11000; now += 1000) {
+        var request = session.tick(now) as ByteArray;
         if (request.equals(Vesc.bmsGetValues())) {
-            bmsRequests += 1;
-            session.onPacket(bmsPayload(4), i * 100 + 50);
+            bmsAt.add(now);
+            session.onPacket(bmsPayload(4), now + 50);
         } else {
             Test.assert(request.equals(Vesc.forwardCan(4, Vesc.refloatAllData())));
-            session.onPacket(allDataPayload(), i * 100 + 50);
+            session.onPacket(allDataPayload(), now + 50);
         }
     }
-    Test.assertEqual(bmsRequests, 2);
+    Test.assertEqual(bmsAt.size(), 3);
+    Test.assertEqual(bmsAt[0], 1000);
+    Test.assertEqual(bmsAt[1], 1000 + BMS_INTERVAL_MS);
     assertNear((session.bms as BmsSample).soc as Float, 0.85);
+    return true;
+}
+
+(:test)
+function pollsSlowlyWhileTheBoardStandsStill(logger as Logger) as Boolean {
+    var session = new BoardSession(4, null);
+    session.onConnected(0);
+    session.tick(0);
+    session.onPacket(allDataPayload(), 50);
+    Test.assert(session.tick(POLL_RIDING_MS) == null);
+    Test.assert(session.tick(POLL_STILL_MS) != null);
+    return true;
+}
+
+(:test)
+function pollsFasterWhileRiding(logger as Logger) as Boolean {
+    var riding = allDataPayload();
+    riding[10] = 1; // RUNNING
+    var session = new BoardSession(4, null);
+    session.onConnected(0);
+    session.tick(0);
+    session.onPacket(riding, 50);
+    Test.assert(session.tick(POLL_RIDING_MS - 1) == null);
+    Test.assert(session.tick(POLL_RIDING_MS) != null);
+    return true;
+}
+
+(:test)
+function sendsOneOffsWithoutWaitingForThePollInterval(logger as Logger) as Boolean {
+    var session = new BoardSession(4, new OneOffRecorder());
+    session.onConnected(0);
+    session.tick(0);
+    session.onPacket(allDataPayload(), 50);
+    session.request(ONE_OFF_INFO, Vesc.refloatInfo());
+    Test.assert(sends(session.tick(100), Vesc.forwardCan(4, Vesc.refloatInfo())));
     return true;
 }
 
@@ -105,7 +142,7 @@ function waitsForTheReplyBeforeTheNextRequest(logger as Logger) as Boolean {
     Test.assert(session.tick(0) != null);
     Test.assert(session.tick(100) == null);
     session.onPacket(allDataPayload(), 150);
-    Test.assert(session.tick(200) != null);
+    Test.assert(session.tick(POLL_STILL_MS) != null);
     return true;
 }
 

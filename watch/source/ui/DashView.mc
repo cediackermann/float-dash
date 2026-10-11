@@ -217,9 +217,13 @@ class DashDelegate extends WatchUi.BehaviorDelegate {
         _view = view;
     }
 
-    //! START: the board picker until a board is connected, then the menu (tunes, lights, tilt).
+    //! START: searches again after the search gave up; the board picker until a board is
+    //! connected; then the menu (tunes, lights, tilt).
     function onSelect() as Boolean {
-        if (_board.link.state == LINK_SCANNING && _board.link.preferredName == null) {
+        if (_board.link.state == LINK_IDLE) {
+            _board.wake();
+            WatchUi.requestUpdate();
+        } else if (_board.link.state == LINK_SCANNING && _board.link.preferredName == null) {
             WatchUi.pushView(new BoardPicker(_board), new BoardPickerDelegate(_board), WatchUi.SLIDE_UP);
         } else {
             WatchUi.pushView(new MainMenu(_controls), new MainMenuDelegate(_board, _controls), WatchUi.SLIDE_UP);

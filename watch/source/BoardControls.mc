@@ -222,7 +222,7 @@ class BoardControls {
         if (sample == null || _board.session.isStale(System.getTimer())) {
             return "No live data from the board. Not applied.";
         }
-        if (sample.isEngaged() || sample.footpads() != 0 || sample.speed.abs() > 1.0) {
+        if (!sample.isStill()) {
             return "The board must stand still with nobody on it. Not applied.";
         }
         return null;

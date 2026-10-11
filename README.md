@@ -38,6 +38,12 @@ connects to it by name on start; while the other app still holds it, the screen 
 **WAITING FOR BOARD** and connects as soon as it is free. Leave the activity before opening the
 watch app on the same board.
 
+To save the watch's battery, telemetry is read 4 times a second while riding and about once a
+second while the board stands still, the battery/BMS every 5 seconds, and the screen is redrawn
+only when new data came in. A search that finds no board stops after a minute: the watch app shows
+**START: SEARCH** (press START to search again), the field shows **NO BOARD** and searches again
+when the activity is started or resumed. Reopening either app searches again too.
+
 ## Tunes
 
 A tune is how the board rides: Refloat's **Tune**, **Tune Modifiers** and **ATR** settings (PID,

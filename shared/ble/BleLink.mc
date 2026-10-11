@@ -15,12 +15,17 @@ enum LinkState {
     LINK_REGISTERING,
     LINK_SCANNING,
     LINK_CONNECTING,
-    LINK_READY
+    LINK_READY,
+    //! Gave up searching to save the battery; `searchAgain` starts over.
+    LINK_IDLE
 }
 
 //! A connection attempt that has not come up in this long is dropped and the scan restarts. A node
 //! busy with another app never answers, and a lost connection may be taken by the other app.
 const CONNECT_TIMEOUT_MS = 8000;
+//! Searching stops after this long without a connection: scanning keeps the radio on, nearly as
+//! costly as riding connected. It starts again only when asked (or when the app starts again).
+const SEARCH_GIVE_UP_MS = 60000;
 //! Bytes per write: the default ATT MTU leaves 20 for the value. Longer frames (a config write) go
 //! out in pieces; the node's UART bridge joins them back into one stream.
 const WRITE_CHUNK = 20;
@@ -56,6 +61,8 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
     private var _listener as LinkListener;
     private var _autoPairAny as Boolean;
     private var _connectingSinceMs as Number = 0;
+    //! Start of the current search: app start, a request to search, or losing the board.
+    private var _searchSinceMs as Number = 0;
     private var _device as BluetoothLowEnergy.Device? = null;
     private var _rx as BluetoothLowEnergy.Characteristic? = null;
     private var _writing as Boolean = false;
@@ -101,12 +108,23 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
         _connectingSinceMs = System.getTimer();
     }
 
-    //! Gives up on a connection that is not coming up and scans again. Called periodically.
+    //! Gives up on a connection that is not coming up and scans again, and stops a search that
+    //! has gone on too long. Called periodically.
     function check(nowMs as Number) as Void {
         if (state == LINK_CONNECTING && nowMs - _connectingSinceMs > CONNECT_TIMEOUT_MS) {
             rescan();
             WatchUi.requestUpdate();
+        } else if (state == LINK_SCANNING && nowMs - _searchSinceMs > SEARCH_GIVE_UP_MS) {
+            BluetoothLowEnergy.setScanState(BluetoothLowEnergy.SCAN_STATE_OFF);
+            state = LINK_IDLE;
+            WatchUi.requestUpdate();
         }
+    }
+
+    //! Starts a new search with its own time limit.
+    function searchAgain() as Void {
+        _searchSinceMs = System.getTimer();
+        rescan();
     }
 
     //! Scanning for a device it knows by name, which may be busy with the other app.
@@ -156,7 +174,7 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
 
     function onProfileRegister(uuid as BluetoothLowEnergy.Uuid, status as BluetoothLowEnergy.Status) as Void {
         // A pairing left by a run that ended without stop() is dropped too: always start from a scan.
-        rescan();
+        searchAgain();
         WatchUi.requestUpdate();
     }
 
@@ -208,6 +226,7 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
             _writing = false;
             _pending = []b;
             if (wasReady) {
+                _searchSinceMs = _connectingSinceMs;
                 _listener.onLinkDown();
             }
             WatchUi.requestUpdate();

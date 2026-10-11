@@ -29,6 +29,11 @@ class RefloatSample {
         return s == 1 || s == 2 || s == 3;
     }
 
+    //! Nobody riding: not engaged, feet off the pads, not rolling.
+    function isStill() as Boolean {
+        return !isEngaged() && footpads() == 0 && speed.abs() <= 1.0;
+    }
+
     //! Refloat `state_compat` (lower nibble), as VESC Tool names it.
     function stateName() as String {
         var names = [

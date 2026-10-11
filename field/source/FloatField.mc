@@ -46,6 +46,16 @@ class FloatField extends WatchUi.DataField {
         _board.pump();
     }
 
+    //! Starting or resuming the activity is the rider's cue that the board is back: search again
+    //! if the search gave up.
+    function onTimerStart() as Void {
+        _board.wake();
+    }
+
+    function onTimerResume() as Void {
+        _board.wake();
+    }
+
     function onUpdate(dc as Dc) as Void {
         var background = getBackgroundColor();
         var foreground = background == Graphics.COLOR_BLACK ? Graphics.COLOR_WHITE : Graphics.COLOR_BLACK;
